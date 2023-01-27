@@ -339,6 +339,31 @@ private:
   /// Therefore, we keep a record of all the places that construct expressions
   /// and insert the fast path later.
   std::vector<SymbolicComputation> expressionUses;
+
+#if DEBUG_CONSISTENCY_CHECK
+  bool isArgInteger(llvm::Value *V) {
+    llvm::Type* type = V->getType();
+    if (type->isIntegerTy() || type->isPointerTy())
+      if (llvm::IntegerType *IT = llvm::dyn_cast<llvm::IntegerType>(type))
+        return IT->getBitWidth() <= 64;
+    return false;
+  }
+  
+  void addConsistencyCheck(llvm::Value *V, llvm::Value *exprV, llvm::IRBuilder<> &IRB) {
+    if (isArgInteger(V)) {
+      IRB.CreateCall(
+        runtime.checkConsistency,
+        {
+          exprV,
+          V->getType()->isPointerTy() 
+            ? IRB.CreateCast(llvm::Instruction::CastOps::PtrToInt, V, IRB.getInt64Ty())
+            : IRB.CreateCast(llvm::Instruction::CastOps::ZExt, V, IRB.getInt64Ty()),
+          llvm::ConstantInt::get(IRB.getInt64Ty(), 0)
+        }
+      );
+    }
+  }
+#endif
 };
 
 #endif

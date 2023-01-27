@@ -35,6 +35,8 @@ extern "C" {
 #include <stdint.h>
 #endif
 
+#include "../../config.h"
+
 /*
  * Initialization
  */
@@ -175,6 +177,10 @@ void _sym_notify_basic_block(uintptr_t site_id);
  */
 const char *_sym_expr_to_string(SymExpr expr); // statically allocated
 bool _sym_feasible(SymExpr expr);
+
+#if DEBUG_CONSISTENCY_CHECK
+void _sym_check_consistency(SymExpr expr, uint64_t expected_value, uint64_t addr);
+#endif
 
 /*
  * Garbage collection

@@ -280,11 +280,17 @@ SymExpr _sym_build_sext(SymExpr expr, uint8_t bits) {
 }
 
 SymExpr _sym_build_zext(SymExpr expr, uint8_t bits) {
+  if (expr == nullptr)
+    return nullptr;
+
   return registerExpression(g_expr_builder->createZExt(
       allocatedExpressions.at(expr), bits + expr->bits()));
 }
 
 SymExpr _sym_build_trunc(SymExpr expr, uint8_t bits) {
+  if (expr == nullptr)
+    return nullptr;
+
   return registerExpression(
       g_expr_builder->createTrunc(allocatedExpressions.at(expr), bits));
 }
@@ -315,6 +321,9 @@ SymExpr _sym_extract_helper(SymExpr expr, size_t first_bit, size_t last_bit) {
 size_t _sym_bits_helper(SymExpr expr) { return expr->bits(); }
 
 SymExpr _sym_build_bool_to_bit(SymExpr expr) {
+  if (expr == nullptr)
+    return nullptr;
+
   return registerExpression(
       g_expr_builder->boolToBit(allocatedExpressions.at(expr), 1));
 }
@@ -441,3 +450,14 @@ void _sym_collect_garbage() {
 void symcc_set_test_case_handler(TestCaseHandler handler) {
   g_test_case_handler = handler;
 }
+
+#if DEBUG_CONSISTENCY_CHECK
+void _sym_check_consistency(SymExpr expr, uint64_t expected_value, uint64_t addr) {
+  if (expr == NULL) return;
+  int res = g_solver->checkConsistency(allocatedExpressions.at(expr), expected_value);
+  if (res == 0) {
+    printf("CONSISTENCY CHECK FAILED AT %lx\n", g_call_stack_manager.currentBasicBlock());
+    abort();
+  }
+}
+#endif

@@ -100,7 +100,7 @@ SymExpr _sym_read_memory(uint8_t *addr, size_t length, bool little_endian) {
     return nullptr;
 
   ReadOnlyShadow shadow(addr, length);
-  return std::accumulate(shadow.begin_non_null(), shadow.end_non_null(),
+  SymExpr res = std::accumulate(shadow.begin_non_null(), shadow.end_non_null(),
                          static_cast<SymExpr>(nullptr),
                          [&](SymExpr result, SymExpr byteExpr) {
                            if (result == nullptr)
@@ -110,6 +110,42 @@ SymExpr _sym_read_memory(uint8_t *addr, size_t length, bool little_endian) {
                                       ? _sym_concat_helper(byteExpr, result)
                                       : _sym_concat_helper(result, byteExpr);
                          });
+
+#if DEBUG_CONSISTENCY_CHECK
+  if (length <= 16) {
+      uint64_t expected_value;
+      switch (length) {
+          case 1:
+              expected_value = *((uint8_t*)addr);
+              break;
+          case 2:
+              expected_value = *((uint16_t*)addr);
+              break;
+          case 4:
+              expected_value = *((uint32_t*)addr);
+              break;
+          case 8:
+              expected_value = *((uint64_t*)addr);
+              break;
+          case 16:
+              if (res) {
+                _sym_check_consistency(
+                  _sym_build_extract(res, 8, 8, 1), 
+                  *((uint64_t*)(addr + 8)), (uint64_t)addr);
+                _sym_check_consistency(
+                  _sym_build_extract(res, 0, 8, 1), 
+                  *((uint64_t*)(addr)), (uint64_t)addr);
+              }
+              break;
+          default:
+              printf("READ SIZE: %ld\n", length);
+              assert(0 && "Unexpected read size");
+      }
+      if (length <= 8)
+        _sym_check_consistency(res, expected_value, (uint64_t)addr);
+  }
+#endif
+  return res;
 }
 
 void _sym_write_memory(uint8_t *addr, size_t length, SymExpr expr,
@@ -233,6 +269,9 @@ void symcc_make_symbolic(void *start, size_t byte_length) {
 }
 
 SymExpr _sym_build_bit_to_bool(SymExpr expr) {
+  if (expr == nullptr)
+    return nullptr;
+    
   return _sym_build_not_equal(expr,
                               _sym_build_integer(0, _sym_bits_helper(expr)));
 }

@@ -33,9 +33,13 @@ void Symbolizer::symbolizeFunctionArguments(Function &F) {
   IRBuilder<> IRB(F.getEntryBlock().getFirstNonPHI());
 
   for (auto &arg : F.args()) {
-    if (!arg.user_empty())
+    if (!arg.user_empty()) {
       symbolicExpressions[&arg] = IRB.CreateCall(runtime.getParameterExpression,
                                                  IRB.getInt8(arg.getArgNo()));
+#if DEBUG_CONSISTENCY_CHECK
+      addConsistencyCheck(&arg, symbolicExpressions[&arg], IRB);
+#endif
+    }
   }
 }
 
@@ -94,6 +98,9 @@ void Symbolizer::shortCircuitExpressionUses() {
     for (const auto &input : symbolicComputation.inputs) {
       nullChecks.push_back(
           IRB.CreateICmpEQ(nullExpression, input.getSymbolicOperand()));
+#if DEBUG_CONSISTENCY_CHECK
+      addConsistencyCheck(input.concreteValue, input.getSymbolicOperand(), IRB);
+#endif
     }
     auto *allConcrete = nullChecks[0];
     for (unsigned argIndex = 1; argIndex < nullChecks.size(); argIndex++) {
@@ -220,6 +227,10 @@ void Symbolizer::handleIntrinsicCall(CallBase &I) {
                    {I.getOperand(0),
                     getSymbolicExpressionOrNull(I.getOperand(1)),
                     IRB.CreateZExtOrTrunc(I.getOperand(2), intPtrType)});
+
+#if DEBUG_CONSISTENCY_CHECK
+    addConsistencyCheck(I.getOperand(1), getSymbolicExpressionOrNull(I.getOperand(1)), IRB);
+#endif
     break;
   }
   case Intrinsic::memmove: {
@@ -316,10 +327,15 @@ void Symbolizer::handleFunctionCall(CallBase &I, Instruction *returnPoint) {
   if (callee == nullptr)
     tryAlternative(IRB, I.getCalledOperand());
 
-  for (Use &arg : I.args())
+  for (Use &arg : I.args()) {
     IRB.CreateCall(runtime.setParameterExpression,
                    {ConstantInt::get(IRB.getInt8Ty(), arg.getOperandNo()),
                     getSymbolicExpressionOrNull(arg)});
+
+#if DEBUG_CONSISTENCY_CHECK
+    addConsistencyCheck(arg, getSymbolicExpressionOrNull(arg), IRB);
+#endif
+  }
 
   if (!I.user_empty()) {
     // The result of the function is used somewhere later on. Since we have no
@@ -334,6 +350,9 @@ void Symbolizer::handleFunctionCall(CallBase &I, Instruction *returnPoint) {
                    ConstantPointerNull::get(IRB.getInt8PtrTy()));
     IRB.SetInsertPoint(returnPoint);
     symbolicExpressions[&I] = IRB.CreateCall(runtime.getReturnExpression);
+#if DEBUG_CONSISTENCY_CHECK
+    addConsistencyCheck(&I, getSymbolicExpressionOrNull(&I), IRB);
+#endif
   }
 }
 
@@ -363,10 +382,22 @@ void Symbolizer::visitBinaryOperator(BinaryOperator &I) {
     }
   }
 
+#if DEBUG_CONSISTENCY_CHECK
+  addConsistencyCheck(I.getOperand(0), getSymbolicExpressionOrNull(I.getOperand(0)), IRB);
+  addConsistencyCheck(I.getOperand(1), getSymbolicExpressionOrNull(I.getOperand(1)), IRB);
+#endif
+
   assert(handler && "Unable to handle binary operator");
   auto runtimeCall =
       buildRuntimeCall(IRB, handler, {I.getOperand(0), I.getOperand(1)});
   registerSymbolicComputation(runtimeCall, &I);
+
+#if DEBUG_CONSISTENCY_CHECK
+  if (runtimeCall.has_value()) {
+    IRB.SetInsertPoint(I.getNextNode());
+    addConsistencyCheck(&I, getSymbolicExpressionOrNull(&I), IRB);
+  }
+#endif
 }
 
 void Symbolizer::visitSelectInst(SelectInst &I) {
@@ -382,10 +413,21 @@ void Symbolizer::visitSelectInst(SelectInst &I) {
   registerSymbolicComputation(runtimeCall);
   if (getSymbolicExpression(I.getTrueValue()) ||
       getSymbolicExpression(I.getFalseValue())) {
+
+#if DEBUG_CONSISTENCY_CHECK
+    addConsistencyCheck(I.getTrueValue(), getSymbolicExpressionOrNull(I.getTrueValue()), IRB);
+    addConsistencyCheck(I.getFalseValue(), getSymbolicExpressionOrNull(I.getFalseValue()), IRB);
+#endif
+
     auto *data = IRB.CreateSelect(
         I.getCondition(), getSymbolicExpressionOrNull(I.getTrueValue()),
         getSymbolicExpressionOrNull(I.getFalseValue()));
     symbolicExpressions[&I] = data;
+
+#if DEBUG_CONSISTENCY_CHECK
+    IRB.SetInsertPoint(I.getNextNode());
+    addConsistencyCheck(&I, data, IRB);
+#endif
   }
 }
 
@@ -394,6 +436,12 @@ void Symbolizer::visitCmpInst(CmpInst &I) {
   // simply include either in the resulting expression.
 
   IRBuilder<> IRB(&I);
+
+#if DEBUG_CONSISTENCY_CHECK
+  addConsistencyCheck(I.getOperand(0), getSymbolicExpressionOrNull(I.getOperand(0)), IRB);
+  addConsistencyCheck(I.getOperand(1), getSymbolicExpressionOrNull(I.getOperand(1)), IRB);
+#endif
+
   SymFnT handler = runtime.comparisonHandlers.at(I.getPredicate());
   assert(handler && "Unable to handle icmp/fcmp variant");
   auto runtimeCall =
@@ -414,6 +462,10 @@ void Symbolizer::visitReturnInst(ReturnInst &I) {
   IRBuilder<> IRB(&I);
   IRB.CreateCall(runtime.setReturnExpression,
                  getSymbolicExpressionOrNull(I.getReturnValue()));
+
+#if DEBUG_CONSISTENCY_CHECK
+  addConsistencyCheck(I.getReturnValue(), getSymbolicExpressionOrNull(I.getReturnValue()), IRB);
+#endif
 }
 
 void Symbolizer::visitBranchInst(BranchInst &I) {
@@ -425,6 +477,11 @@ void Symbolizer::visitBranchInst(BranchInst &I) {
     return;
 
   IRBuilder<> IRB(&I);
+
+#if DEBUG_CONSISTENCY_CHECK
+  addConsistencyCheck(I.getCondition(), getSymbolicExpressionOrNull(I.getCondition()), IRB);
+#endif
+
   auto runtimeCall = buildRuntimeCall(IRB, runtime.pushPathConstraint,
                                       {{I.getCondition(), true},
                                        {I.getCondition(), false},
@@ -485,6 +542,11 @@ void Symbolizer::visitLoadInst(LoadInst &I) {
   }
 
   symbolicExpressions[&I] = data;
+
+#if DEBUG_CONSISTENCY_CHECK
+  IRB.SetInsertPoint(I.getNextNode());
+  addConsistencyCheck(&I, data, IRB);
+#endif
 }
 
 void Symbolizer::visitStoreInst(StoreInst &I) {
@@ -510,6 +572,12 @@ void Symbolizer::visitStoreInst(StoreInst &I) {
        ConstantInt::get(intPtrType, dataLayout.getTypeStoreSize(dataType)),
        data,
        ConstantInt::get(IRB.getInt8Ty(), dataLayout.isLittleEndian() ? 1 : 0)});
+
+#if DEBUG_CONSISTENCY_CHECK
+  if (data) {
+    addConsistencyCheck(I.getValueOperand(), data, IRB);
+  }
+#endif
 }
 
 void Symbolizer::visitGetElementPtrInst(GetElementPtrInst &I) {
@@ -765,6 +833,12 @@ void Symbolizer::visitCastInst(CastInst &I) {
                                        I.getSrcTy()->getIntegerBitWidth()),
                            false}});
     registerSymbolicComputation(symbolicCast, &I);
+#if DEBUG_CONSISTENCY_CHECK
+    if (symbolicCast.has_value()) {
+      IRB.SetInsertPoint(I.getNextNode());
+      addConsistencyCheck(&I, getSymbolicExpressionOrNull(&I), IRB);
+    }
+#endif
   }
 }
 
@@ -789,6 +863,11 @@ void Symbolizer::visitPHINode(PHINode &I) {
 
 void Symbolizer::visitInsertValueInst(InsertValueInst &I) {
   IRBuilder<> IRB(&I);
+
+#if DEBUG_CONSISTENCY_CHECK && 0
+  addConsistencyCheck(I.getInsertedValueOperand(), getSymbolicExpressionOrNull(I.getInsertedValueOperand()), IRB);
+#endif
+
   auto target = I.getAggregateOperand();
   auto insertedValue = I.getInsertedValueOperand();
   auto insertedValueType = insertedValue->getType();
@@ -851,6 +930,11 @@ void Symbolizer::visitExtractValueInst(ExtractValueInst &I) {
 
   registerSymbolicComputation(
       {extractedBits, result, {{target, 0, extractedBits}}}, &I);
+
+#if DEBUG_CONSISTENCY_CHECK
+  IRB.SetInsertPoint(I.getNextNode());
+  addConsistencyCheck(&I, extractedBits, IRB);
+#endif
 }
 
 void Symbolizer::visitSwitchInst(SwitchInst &I) {

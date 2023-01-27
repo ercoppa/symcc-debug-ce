@@ -157,6 +157,10 @@ Runtime::Runtime(Module &M) {
   notifyCall = import(M, "_sym_notify_call", voidT, intPtrType);
   notifyRet = import(M, "_sym_notify_ret", voidT, intPtrType);
   notifyBasicBlock = import(M, "_sym_notify_basic_block", voidT, intPtrType);
+
+#if DEBUG_CONSISTENCY_CHECK
+  checkConsistency = import(M, "_sym_check_consistency", voidT, ptrT, IRB.getInt64Ty(), IRB.getInt64Ty());
+#endif
 }
 
 /// Decide whether a function is called symbolically.

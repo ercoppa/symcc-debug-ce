@@ -18,6 +18,8 @@
 #include <llvm/IR/InstrTypes.h>
 #include <llvm/IR/Module.h>
 
+#include "../../config.h"
+
 #if LLVM_VERSION_MAJOR >= 9 && LLVM_VERSION_MAJOR < 11
 using SymFnT = llvm::Value *;
 #else
@@ -67,6 +69,10 @@ struct Runtime {
   SymFnT notifyCall{};
   SymFnT notifyRet{};
   SymFnT notifyBasicBlock{};
+
+#if DEBUG_CONSISTENCY_CHECK
+  SymFnT checkConsistency{};
+#endif
 
   /// Mapping from icmp predicates to the functions that build the corresponding
   /// symbolic expressions.
