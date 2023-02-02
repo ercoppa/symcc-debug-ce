@@ -23,6 +23,7 @@
 #include <iostream>
 #include <set>
 #include <vector>
+#include <fstream>
 
 #ifndef NDEBUG
 #include <chrono>
@@ -438,10 +439,125 @@ Z3_ast _sym_build_bool_to_bit(Z3_ast expr) {
                                       _sym_build_integer(0, 1)));
 }
 
+#if DEBUG_CHECK_INPUTS
+
+std::vector<uint8_t> getConcreteValues(Z3_model model) {
+  unsigned num_constants =  Z3_model_get_num_consts(g_context, model);
+  std::vector<uint8_t> values = inputs_;
+  for (unsigned i = 0; i < num_constants; i++) {
+
+    Z3_func_decl decl = Z3_model_get_const_decl(g_context, model, i);
+    Z3_ast e = Z3_model_get_const_interp(g_context, model, decl);
+    // Z3_decl_kind kind = Z3_get_decl_kind(g_context, decl);
+    Z3_symbol symbol = Z3_get_decl_name(g_context, decl);
+    Z3_symbol_kind symbol_kind = Z3_get_symbol_kind(g_context, symbol);
+
+    if (symbol_kind == Z3_STRING_SYMBOL) {
+      uint64_t value;
+      Z3_get_numeral_uint64(g_context, e, &value);
+      const char* name = Z3_get_symbol_string(g_context, symbol);
+      int idx = atoi(name + 5 /* "stdin" */);
+      values[idx] = (uint8_t)value;
+    }
+  }
+  return values;
+}
+
+static uint32_t debug_count;
+static uint32_t debug_hash;
+static uint8_t debug_taken;
+void saveValues(std::vector<uint8_t>& values) {
+
+  static int num_generated_ = 0;
+  static char* out_dir = nullptr;
+  if (out_dir == nullptr) {
+    out_dir = getenv("SYMCC_OUTPUT_DIR");
+    assert(out_dir);
+  }
+  std::string fname = std::string(out_dir) + "/input";
+  static char s_count[16];
+  static char s_hash[32];
+  sprintf(s_hash, "%x", debug_hash);
+  sprintf(s_count, "%d", debug_count);
+  fname = fname + "_" + std::string(s_hash) + "_" + std::string(s_count) + "_" + (debug_taken ? "1" : "0");
+
+  std::ofstream of(fname, std::ofstream::out | std::ofstream::binary);
+  printf("New testcase: %s\n", fname.c_str());
+  if (of.fail())
+    printf("Unable to open a file to write results\n");
+
+  // TODO: batch write
+  for (unsigned i = 0; i < values.size(); i++) {
+    char val = values[i];
+    of.write(&val, sizeof(val));
+  }
+
+  of.close();
+  num_generated_++;
+}
+
+#endif
+
 void _sym_push_path_constraint(Z3_ast constraint, int taken,
                                uintptr_t site_id [[maybe_unused]]) {
   if (constraint == nullptr)
     return;
+
+#if DEBUG_CHECK_INPUTS
+  debug_count += 1;
+  debug_hash = debug_hash ^ site_id;
+  debug_taken = taken;
+
+  static int check_input = -1;
+  static uint32_t check_input_count = 0;
+  static uint32_t check_input_hash = 0;
+  static uint32_t check_input_taken = 0;
+  if (check_input == -1) {
+
+    if (getenv("DEBUG_CHECK_INPUT"))
+      check_input = 1;
+    else
+      check_input = 0;
+
+    if (check_input) {
+      if (getenv("DEBUG_CHECK_INPUT_COUNT"))
+        check_input_count = atoi(getenv("DEBUG_CHECK_INPUT_COUNT"));
+      else
+        abort();
+
+      if (getenv("DEBUG_CHECK_INPUT_HASH"))
+        check_input_hash = strtol(getenv("DEBUG_CHECK_INPUT_HASH"), NULL, 16);
+      else
+        abort();
+      
+      if (getenv("DEBUG_CHECK_INPUT_TAKEN"))
+        check_input_taken = atoi(getenv("DEBUG_CHECK_INPUT_TAKEN"));
+      else
+        abort();
+    }
+  }
+
+  if (check_input) {
+    // printf("Checking...\n");
+    if (debug_count == check_input_count) {
+      if (debug_hash == check_input_hash) {
+        if (debug_taken != check_input_taken) {
+          printf("Input is taking the expected direction!\n");
+          exit(0);
+        } else {
+          printf("Input is divergent: it reaches the same branch but does not take the expected direction!\n");
+          exit(66);
+        }
+      } else {
+        printf("Input is divergent: it does take the same path! [hash is different: %x vs expected=%x]\n", debug_hash, check_input_hash);
+        exit(66);
+      }
+    } else if (debug_count > check_input_count) {
+      printf("Input is divergent: it does take the same path! [count is larger]\n");
+      exit(66);
+    }
+  } 
+#endif
 
   constraint = Z3_simplify(g_context, constraint);
   Z3_inc_ref(g_context, constraint);
@@ -472,12 +588,31 @@ void _sym_push_path_constraint(Z3_ast constraint, int taken,
   fprintf(g_log, "Trying to solve:\n%s\n",
           Z3_solver_to_string(g_context, g_solver));
 
-  Z3_lbool feasible = Z3_solver_check(g_context, g_solver);
+  Z3_lbool feasible;
+#if DEBUG_SKIP_QUERIES
+  static int skip = -1;
+  if (skip == -1) {
+    if (getenv("SYMCC_SKIP_QUERIES"))
+      skip = 1;
+    else
+      skip = 0;
+  }
+  if (skip)
+    feasible = Z3_L_FALSE;
+  else
+#endif
+  feasible = Z3_solver_check(g_context, g_solver);
   if (feasible == Z3_L_TRUE) {
     Z3_model model = Z3_solver_get_model(g_context, g_solver);
     Z3_model_inc_ref(g_context, model);
     fprintf(g_log, "Found diverging input:\n%s\n",
             Z3_model_to_string(g_context, model));
+
+#if DEBUG_CHECK_INPUTS
+    std::vector<uint8_t> values = getConcreteValues(model);
+    saveValues(values);
+#endif
+
     Z3_model_dec_ref(g_context, model);
   } else {
     fprintf(g_log, "Can't find a diverging input at this point\n");
