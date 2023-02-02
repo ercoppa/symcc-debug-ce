@@ -113,7 +113,7 @@ SymExpr _sym_read_memory(uint8_t *addr, size_t length, bool little_endian) {
 
 #if DEBUG_CONSISTENCY_CHECK
   if (length <= 16) {
-      uint64_t expected_value;
+      uint64_t expected_value = 0;
       switch (length) {
           case 1:
               expected_value = *((uint8_t*)addr);

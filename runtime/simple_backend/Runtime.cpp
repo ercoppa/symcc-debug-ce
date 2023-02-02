@@ -180,11 +180,26 @@ Z3_ast _sym_build_float(double value, int is_double) {
   return result;
 }
 
-Z3_ast _sym_get_input_byte(size_t offset, uint8_t) {
+#if DEBUG_CONSISTENCY_CHECK
+static std::vector<uint8_t> inputs_;
+void pushInputByte(size_t offset, uint8_t value) {
+  
+  if (inputs_.size() <= offset)
+    inputs_.resize(offset + 1);
+
+  inputs_[offset] = value;
+}
+#endif
+
+Z3_ast _sym_get_input_byte(size_t offset, uint8_t data) {
   static std::vector<SymExpr> stdinBytes;
 
   if (offset < stdinBytes.size())
     return stdinBytes[offset];
+
+#if DEBUG_CONSISTENCY_CHECK
+  pushInputByte(offset, data);
+#endif
 
   auto varName = "stdin" + std::to_string(stdinBytes.size());
   auto *var = build_variable(varName.c_str(), 8);
@@ -501,7 +516,14 @@ size_t _sym_bits_helper(SymExpr expr) {
 /* No call-stack tracing */
 void _sym_notify_call(uintptr_t) {}
 void _sym_notify_ret(uintptr_t) {}
+#if DEBUG_CONSISTENCY_CHECK
+static uint64_t last_bb = 0;
+void _sym_notify_basic_block(uintptr_t id) {
+  last_bb = id;
+}
+#else
 void _sym_notify_basic_block(uintptr_t) {}
+#endif
 
 /* Debugging */
 const char *_sym_expr_to_string(SymExpr expr) {
@@ -564,3 +586,97 @@ void symcc_set_test_case_handler(TestCaseHandler) {
       g_log,
       "Warning: test-case handlers aren't supported in the simple backend\n");
 }
+
+#if DEBUG_CONSISTENCY_CHECK
+
+int checkConsistencySMT(Z3_ast e, uint64_t expected_value) {
+
+  static Z3_model m = NULL;
+  if (m == NULL) {
+    Z3_set_ast_print_mode(g_context, Z3_PRINT_LOW_LEVEL);
+    std::vector<uint8_t> values = inputs_;
+    m = Z3_mk_model(g_context);
+    Z3_model_inc_ref(g_context, m);
+    Z3_sort sort = Z3_mk_bv_sort(g_context, 8);
+    for (size_t i = 0; i < inputs_.size(); i++) {
+
+      // Z3_symbol s =  Z3_mk_int_symbol(g_context, i);
+      Z3_ast v = Z3_mk_int(g_context, inputs_[i], sort);
+      Z3_inc_ref(g_context, v);
+
+      // printf("input[%ld] = %x\n", i, inputs_[i]);
+      // printf("%s\n", Z3_ast_to_string(g_context, v));
+
+      auto varName = "stdin" + std::to_string(i);
+      Z3_symbol s = Z3_mk_string_symbol(g_context, varName.c_str());
+
+      Z3_func_decl decl = Z3_mk_func_decl(g_context, s, 0, NULL, sort);
+      Z3_add_const_interp(g_context, m, decl, v);
+    }
+
+    // printf("Model:\n%s\n", Z3_model_to_string(g_context, m));
+  }
+
+  // printf("EXPR: %s\n", Z3_ast_to_string(g_context, e));
+
+  uint64_t  value;
+  Z3_ast    solution = nullptr;
+  Z3_bool   successfulEval =
+      Z3_model_eval(g_context, m, e, Z3_TRUE, &solution);
+  assert(successfulEval && "Failed to evaluate model");
+  if (!successfulEval) abort();
+
+  if (Z3_get_ast_kind(g_context, solution) == Z3_NUMERAL_AST) {
+    Z3_bool successGet =
+          Z3_get_numeral_uint64(g_context, solution, (uint64_t*)&value);
+    assert(successGet);
+    if (value != expected_value) {
+      Z3_set_ast_print_mode(g_context, Z3_PRINT_LOW_LEVEL);
+      printf("[%d] %s\n", successGet, Z3_ast_to_string(g_context, e));
+      printf("FAILURE: %lx vs expected=%lx\n", value, expected_value);
+    } else {
+      printf("SUCCESS: %lx vs expected=%lx\n", value, expected_value);
+    }
+    return value == expected_value;
+  } else {
+
+    Z3_lbool res = Z3_get_bool_value(g_context, solution);
+    if (res == Z3_L_TRUE) {
+      value = 1;
+      if (value != expected_value) {
+        Z3_set_ast_print_mode(g_context, Z3_PRINT_LOW_LEVEL);
+        printf("%s\n", Z3_ast_to_string(g_context, e));
+        printf("BOOL FAILURE: %lx vs expected=%lx\n", value, expected_value);
+      }
+      return value == expected_value;
+    } else if (res == Z3_L_FALSE) {
+      value = 0;
+      if (value != expected_value) {
+        Z3_set_ast_print_mode(g_context, Z3_PRINT_LOW_LEVEL);
+        printf("%s\n", Z3_ast_to_string(g_context, e));
+        printf("BOOL FAILURE: %lx vs expected=%lx\n", value, expected_value);
+      }
+      return value == expected_value;
+    } else {
+      printf("KIND: %x\n", Z3_get_ast_kind(g_context, solution));
+      Z3_set_ast_print_mode(g_context, Z3_PRINT_LOW_LEVEL);
+      printf("EXPR: %s\n", Z3_ast_to_string(g_context, e));
+      assert(0 && "Cannot evaluate");
+      abort();
+    }
+  }
+}
+
+int checkConsistency(Z3_ast e, uint64_t expected_value) {
+  return checkConsistencySMT(e, expected_value);
+}
+
+void _sym_check_consistency(SymExpr expr, uint64_t expected_value, uint64_t) {
+  if (expr == NULL) return;
+  int res = checkConsistency(expr, expected_value);
+  if (res == 0) {
+    printf("CONSISTENCY CHECK FAILED AT %lx\n", last_bb);
+    abort();
+  }
+}
+#endif
