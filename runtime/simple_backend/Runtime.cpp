@@ -495,7 +495,7 @@ void saveValues(std::vector<uint8_t>& values) {
   of.close();
   num_generated_++;
 }
-
+int checkConsistencySMT(Z3_ast e, uint64_t expected_value);
 #endif
 
 void _sym_push_path_constraint(Z3_ast constraint, int taken,
@@ -629,6 +629,25 @@ void _sym_push_path_constraint(Z3_ast constraint, int taken,
          "Asserting infeasible path constraint");
   Z3_dec_ref(g_context, constraint);
   Z3_dec_ref(g_context, not_constraint);
+
+#if DEBUG_CHECK_PI_CONCRETE
+  printf("Checking PI CONCRETE\n");
+  Z3_ast_vector r = Z3_solver_get_assertions(g_context, g_solver);
+  Z3_ast_vector_inc_ref(g_context, r);
+  if (Z3_ast_vector_size(g_context, r) > 0) {
+    Z3_ast* array = (Z3_ast*) malloc(sizeof(Z3_ast) * Z3_ast_vector_size(g_context, r));
+    for(uint32_t i = 0; i < Z3_ast_vector_size(g_context, r); i++)
+      array[i] = Z3_ast_vector_get(g_context, r, i);
+    Z3_ast query = Z3_mk_and(g_context, Z3_ast_vector_size(g_context, r), array);
+    if(checkConsistencySMT(query, 1) == 0) {
+      printf("Adding infeasible constraints: %s\n", Z3_ast_to_string(g_context, (taken ? constraint : not_constraint)));
+      abort();
+    } else {
+      // printf("\nPI OK\n\n");
+    }
+  }
+  Z3_ast_vector_dec_ref(g_context, r);
+#endif
 }
 
 SymExpr _sym_concat_helper(SymExpr a, SymExpr b) {
