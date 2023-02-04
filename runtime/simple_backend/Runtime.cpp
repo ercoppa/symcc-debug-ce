@@ -495,7 +495,7 @@ void saveValues(std::vector<uint8_t>& values) {
 }
 
 static uint64_t fuzz_check_count = 0;
-void saveDebugInput(std::vector<uint8_t>& values, uint64_t debug_value) {
+void saveDebugInput(std::vector<uint8_t>& values, uint64_t debug_value, int n) {
 
   static char* out_dir = nullptr;
   if (out_dir == nullptr) {
@@ -507,7 +507,7 @@ void saveDebugInput(std::vector<uint8_t>& values, uint64_t debug_value) {
   static char s_value[32];
   sprintf(s_value, "%lx", debug_value);
   sprintf(s_count, "%05ld", fuzz_check_count);
-  fname = fname + "_" + std::string(s_count) + "_" + std::string(s_value);
+  fname = fname + "_" + std::string(s_count) + "_" + std::string(s_value) + "_" + std::to_string(n);
 
   std::ofstream of(fname, std::ofstream::out | std::ofstream::binary);
   printf("DEBUG testcase: %s\n", fname.c_str());
@@ -906,32 +906,40 @@ void _sym_check_consistency(SymExpr expr, uint64_t expected_value, uint64_t) {
   Z3_solver_push(g_context, g_solver);
   Z3_sort sort = Z3_get_sort(g_context, expr);
   Z3_ast not_e;
-  if (Z3_get_sort_kind(g_context, sort) == Z3_BOOL_SORT)
-    not_e = Z3_mk_not(g_context, expr);
-  else
-    not_e = _sym_build_not_equal(expr, _sym_build_integer(expected_value, _sym_bits_helper(expr)));
-  Z3_solver_assert(g_context, g_solver, not_e);
-  Z3_lbool feasible = Z3_solver_check(g_context, g_solver);
-  if (feasible == Z3_L_TRUE) {
-    Z3_model model = Z3_solver_get_model(g_context, g_solver);
-    Z3_model_inc_ref(g_context, model);
-    std::vector<uint8_t> values = getConcreteValues(model);
-    Z3_ast solution = nullptr;
-    Z3_model_eval(g_context, model, expr, Z3_TRUE, &solution);
-    uint64_t value = 0;
+  uint64_t current_value = expected_value;
+  for (int i = 0; i < DEBUG_FUZZ_EXPRS_N; i++) {
+    bool is_bool = false;
     if (Z3_get_sort_kind(g_context, sort) == Z3_BOOL_SORT) {
-      Z3_lbool res = Z3_get_bool_value(g_context, solution);
-      if (res == Z3_L_TRUE)
-        value = 1;
-      else if (res == Z3_L_FALSE)
-        value = 0;
-      else
-        abort();
+      not_e = Z3_mk_not(g_context, expr);
+      is_bool = true;
     } else
-      Z3_get_numeral_uint64(g_context, solution, &value);
-    saveDebugInput(values, value);
-    Z3_model_dec_ref(g_context, model);
-  } 
+      not_e = _sym_build_not_equal(expr, _sym_build_integer(current_value, _sym_bits_helper(expr)));
+    Z3_solver_assert(g_context, g_solver, not_e);
+    Z3_lbool feasible = Z3_solver_check(g_context, g_solver);
+    if (feasible == Z3_L_TRUE) {
+      Z3_model model = Z3_solver_get_model(g_context, g_solver);
+      Z3_model_inc_ref(g_context, model);
+      std::vector<uint8_t> values = getConcreteValues(model);
+      Z3_ast solution = nullptr;
+      Z3_model_eval(g_context, model, expr, Z3_TRUE, &solution);
+      uint64_t value = 0;
+      if (is_bool) {
+        Z3_lbool res = Z3_get_bool_value(g_context, solution);
+        if (res == Z3_L_TRUE)
+          value = 1;
+        else if (res == Z3_L_FALSE)
+          value = 0;
+        else
+          abort();
+      } else
+        Z3_get_numeral_uint64(g_context, solution, &value);
+      assert(current_value != value);
+      current_value = value;
+      saveDebugInput(values, value, i);
+      Z3_model_dec_ref(g_context, model);
+    } 
+    if (is_bool) break;
+  }
   Z3_solver_pop(g_context, g_solver, 1);
 #endif
 }
