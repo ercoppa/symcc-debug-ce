@@ -468,7 +468,6 @@ static uint32_t debug_hash;
 static uint8_t debug_taken;
 void saveValues(std::vector<uint8_t>& values) {
 
-  static int num_generated_ = 0;
   static char* out_dir = nullptr;
   if (out_dir == nullptr) {
     out_dir = getenv("SYMCC_OUTPUT_DIR");
@@ -493,8 +492,37 @@ void saveValues(std::vector<uint8_t>& values) {
   }
 
   of.close();
-  num_generated_++;
 }
+
+static uint64_t fuzz_check_count = 0;
+void saveDebugInput(std::vector<uint8_t>& values, uint64_t debug_value) {
+
+  static char* out_dir = nullptr;
+  if (out_dir == nullptr) {
+    out_dir = getenv("SYMCC_OUTPUT_DIR");
+    assert(out_dir);
+  }
+  std::string fname = std::string(out_dir) + "/debug";
+  static char s_count[16];
+  static char s_value[32];
+  sprintf(s_value, "%lx", debug_value);
+  sprintf(s_count, "%05ld", fuzz_check_count);
+  fname = fname + "_" + std::string(s_count) + "_" + std::string(s_value);
+
+  std::ofstream of(fname, std::ofstream::out | std::ofstream::binary);
+  printf("DEBUG testcase: %s\n", fname.c_str());
+  if (of.fail())
+    printf("Unable to open a file to write results\n");
+
+  // TODO: batch write
+  for (unsigned i = 0; i < values.size(); i++) {
+    char val = values[i];
+    of.write(&val, sizeof(val));
+  }
+
+  of.close();
+}
+
 int checkConsistencySMT(Z3_ast e, uint64_t expected_value);
 #endif
 
@@ -832,5 +860,79 @@ void _sym_check_consistency(SymExpr expr, uint64_t expected_value, uint64_t) {
     printf("CONSISTENCY CHECK FAILED AT %lx\n", last_bb);
     abort();
   }
+
+#if DEBUG_FUZZ_EXPRS
+
+  int fuzz_expr = -1;
+  uint64_t fuzz_count = 0;
+  uint64_t fuzz_value = 0;
+  if (fuzz_expr == -1) {
+
+    if (getenv("DEBUG_FUZZ_EXPR"))
+      fuzz_expr = 1;
+    else
+      fuzz_expr = 0;
+
+    if (fuzz_expr) {
+      if (getenv("DEBUG_FUZZ_EXPR_COUNT"))
+        fuzz_count = atoi(getenv("DEBUG_FUZZ_EXPR_COUNT"));
+      else
+        abort();
+
+      if (getenv("DEBUG_FUZZ_EXPR_VALUE"))
+        fuzz_value = strtol(getenv("DEBUG_FUZZ_EXPR_VALUE"), NULL, 16);
+      else
+        abort();
+    }
+  }
+
+  fuzz_check_count += 1;
+  if (fuzz_expr) {
+    if (fuzz_count == fuzz_check_count) {
+      if (fuzz_value == expected_value) {
+        printf("Expression has expected value!\n");
+        exit(0);
+      } else {
+        printf("Expression has wrong value [%lx vs expected=%lx]\n", expected_value, fuzz_value);
+        exit(66);
+      }
+    } else if (fuzz_count < fuzz_check_count) {
+      printf("Expression check has been bypassed [count is larger]\n");
+      exit(66);
+    }
+    return;
+  }
+
+  Z3_solver_push(g_context, g_solver);
+  Z3_sort sort = Z3_get_sort(g_context, expr);
+  Z3_ast not_e;
+  if (Z3_get_sort_kind(g_context, sort) == Z3_BOOL_SORT)
+    not_e = Z3_mk_not(g_context, expr);
+  else
+    not_e = _sym_build_not_equal(expr, _sym_build_integer(expected_value, _sym_bits_helper(expr)));
+  Z3_solver_assert(g_context, g_solver, not_e);
+  Z3_lbool feasible = Z3_solver_check(g_context, g_solver);
+  if (feasible == Z3_L_TRUE) {
+    Z3_model model = Z3_solver_get_model(g_context, g_solver);
+    Z3_model_inc_ref(g_context, model);
+    std::vector<uint8_t> values = getConcreteValues(model);
+    Z3_ast solution = nullptr;
+    Z3_model_eval(g_context, model, expr, Z3_TRUE, &solution);
+    uint64_t value = 0;
+    if (Z3_get_sort_kind(g_context, sort) == Z3_BOOL_SORT) {
+      Z3_lbool res = Z3_get_bool_value(g_context, solution);
+      if (res == Z3_L_TRUE)
+        value = 1;
+      else if (res == Z3_L_FALSE)
+        value = 0;
+      else
+        abort();
+    } else
+      Z3_get_numeral_uint64(g_context, solution, &value);
+    saveDebugInput(values, value);
+    Z3_model_dec_ref(g_context, model);
+  } 
+  Z3_solver_pop(g_context, g_solver, 1);
+#endif
 }
 #endif
