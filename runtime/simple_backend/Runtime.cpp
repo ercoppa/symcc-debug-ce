@@ -34,6 +34,10 @@
 #include "LibcWrappers.h"
 #include "Shadow.h"
 
+#ifdef DEBUG_CE_H
+int debug_abort = -1;
+#endif
+
 #ifndef NDEBUG
 // Helper to print pointers properly.
 #define P(ptr) reinterpret_cast<void *>(ptr)
@@ -182,6 +186,7 @@ Z3_ast _sym_build_float(double value, int is_double) {
 }
 
 #if DEBUG_CONSISTENCY_CHECK
+static Z3_model cached_model = NULL;
 static std::vector<uint8_t> inputs_;
 void pushInputByte(size_t offset, uint8_t value) {
   
@@ -189,24 +194,41 @@ void pushInputByte(size_t offset, uint8_t value) {
     inputs_.resize(offset + 1);
 
   inputs_[offset] = value;
+
+  Z3_model_dec_ref(g_context, cached_model);
+  cached_model = NULL;
 }
 #endif
 
 Z3_ast _sym_get_input_byte(size_t offset, uint8_t data) {
   static std::vector<SymExpr> stdinBytes;
 
+#if SYMCC_FIX_ISSUE_INPUT
+  if (offset < stdinBytes.size() && stdinBytes[offset])
+    return stdinBytes[offset];
+#else
   if (offset < stdinBytes.size())
     return stdinBytes[offset];
+#endif
 
 #if DEBUG_CONSISTENCY_CHECK
   pushInputByte(offset, data);
 #endif
 
+#if DEBUG_CONSISTENCY_CHECK
+  auto varName = "stdin" + std::to_string(offset);
+#else
   auto varName = "stdin" + std::to_string(stdinBytes.size());
+#endif
   auto *var = build_variable(varName.c_str(), 8);
 
+#if SYMCC_FIX_ISSUE_INPUT
+  stdinBytes.resize(offset + 1);
+  stdinBytes[offset] = var;
+#else
   stdinBytes.resize(offset);
   stdinBytes.push_back(var);
+#endif
 
   return var;
 }
@@ -431,6 +453,7 @@ Z3_ast _sym_build_float_to_unsigned_integer(Z3_ast expr, uint8_t bits) {
       g_context, Z3_mk_fpa_round_toward_zero(g_context), expr, bits));
 }
 
+#if SYMCC_FIX_ISSUE_108
 Z3_ast _sym_build_bool_to_bit(Z3_ast expr) {
   if (expr == nullptr)
     return nullptr;
@@ -438,6 +461,13 @@ Z3_ast _sym_build_bool_to_bit(Z3_ast expr) {
   return registerExpression(Z3_mk_ite(g_context, expr, _sym_build_integer(1, 1),
                                       _sym_build_integer(0, 1)));
 }
+#else
+Z3_ast _sym_build_bool_to_bits(Z3_ast expr, uint8_t bits) {
+  return registerExpression(Z3_mk_ite(g_context, expr,
+                                      _sym_build_integer(1, bits),
+                                      _sym_build_integer(0, bits)));
+}
+#endif
 
 #if DEBUG_CHECK_INPUTS
 
@@ -477,8 +507,8 @@ void saveValues(std::vector<uint8_t>& values) {
   static char s_count[16];
   static char s_hash[32];
   sprintf(s_hash, "%x", debug_hash);
-  sprintf(s_count, "%d", debug_count);
-  fname = fname + "_" + std::string(s_hash) + "_" + std::string(s_count) + "_" + (debug_taken ? "1" : "0");
+  sprintf(s_count, "%05d", debug_count);
+  fname = fname + "_" + std::string(s_count) + "_" + std::string(s_hash) + "_" + (debug_taken ? "1" : "0");
 
   std::ofstream of(fname, std::ofstream::out | std::ofstream::binary);
   printf("New testcase: %s\n", fname.c_str());
@@ -496,6 +526,8 @@ void saveValues(std::vector<uint8_t>& values) {
 
 static uint64_t fuzz_check_count = 0;
 void saveDebugInput(std::vector<uint8_t>& values, uint64_t debug_value, int n) {
+
+  if (fuzz_check_count == 0) abort();
 
   static char* out_dir = nullptr;
   if (out_dir == nullptr) {
@@ -526,6 +558,10 @@ void saveDebugInput(std::vector<uint8_t>& values, uint64_t debug_value, int n) {
 int checkConsistencySMT(Z3_ast e, uint64_t expected_value);
 #endif
 
+#if DEBUG_CHECK_EXPR_OPTS
+void checkConsistencyOpt(SymExpr e0, SymExpr e1);
+#endif
+
 void _sym_push_path_constraint(Z3_ast constraint, int taken,
                                uintptr_t site_id [[maybe_unused]]) {
   if (constraint == nullptr)
@@ -542,12 +578,18 @@ void _sym_push_path_constraint(Z3_ast constraint, int taken,
   static uint32_t check_input_taken = 0;
   if (check_input == -1) {
 
-    if (getenv("DEBUG_CHECK_INPUT"))
-      check_input = 1;
-    else
+    char* s = getenv("DEBUG_CHECK_INPUT");
+    if (s) {
+      if (strcmp(s, "DUMP") == 0)
+        check_input = 1;
+      else if (strcmp(s, "CHECK") == 0)
+        check_input = 2;
+      else
+        abort();
+    } else
       check_input = 0;
 
-    if (check_input) {
+    if (check_input == 2) {
       if (getenv("DEBUG_CHECK_INPUT_COUNT"))
         check_input_count = atoi(getenv("DEBUG_CHECK_INPUT_COUNT"));
       else
@@ -565,7 +607,7 @@ void _sym_push_path_constraint(Z3_ast constraint, int taken,
     }
   }
 
-  if (check_input) {
+  if (check_input == 2) {
     // printf("Checking...\n");
     if (debug_count == check_input_count) {
       if (debug_hash == check_input_hash) {
@@ -587,8 +629,16 @@ void _sym_push_path_constraint(Z3_ast constraint, int taken,
   } 
 #endif
 
+#if DEBUG_CHECK_EXPR_OPTS
+  Z3_ast original_constraint = constraint;
+#endif
+
   constraint = Z3_simplify(g_context, constraint);
   Z3_inc_ref(g_context, constraint);
+
+#if DEBUG_CHECK_EXPR_OPTS
+  checkConsistencyOpt(original_constraint, constraint);
+#endif
 
   /* Check the easy cases first: if simplification reduced the constraint to
      "true" or "false", there is no point in trying to solve the negation or *
@@ -613,8 +663,7 @@ void _sym_push_path_constraint(Z3_ast constraint, int taken,
 
   Z3_solver_push(g_context, g_solver);
   Z3_solver_assert(g_context, g_solver, taken ? not_constraint : constraint);
-  fprintf(g_log, "Trying to solve:\n%s\n",
-          Z3_solver_to_string(g_context, g_solver));
+  // fprintf(g_log, "Trying to solve:\n%s\n", Z3_solver_to_string(g_context, g_solver));
 
   Z3_lbool feasible;
 #if DEBUG_SKIP_QUERIES
@@ -637,12 +686,17 @@ void _sym_push_path_constraint(Z3_ast constraint, int taken,
             Z3_model_to_string(g_context, model));
 
 #if DEBUG_CHECK_INPUTS
-    std::vector<uint8_t> values = getConcreteValues(model);
-    saveValues(values);
+    if (check_input == 1) {
+      std::vector<uint8_t> values = getConcreteValues(model);
+      saveValues(values);
+    }
 #endif
 
     Z3_model_dec_ref(g_context, model);
   } else {
+#if DEBUG_SKIP_QUERIES
+    if (!skip)
+#endif
     fprintf(g_log, "Can't find a diverging input at this point\n");
   }
   fflush(g_log);
@@ -658,23 +712,61 @@ void _sym_push_path_constraint(Z3_ast constraint, int taken,
   Z3_dec_ref(g_context, constraint);
   Z3_dec_ref(g_context, not_constraint);
 
-#if DEBUG_CHECK_PI_CONCRETE
-  printf("Checking PI CONCRETE\n");
-  Z3_ast_vector r = Z3_solver_get_assertions(g_context, g_solver);
-  Z3_ast_vector_inc_ref(g_context, r);
-  if (Z3_ast_vector_size(g_context, r) > 0) {
-    Z3_ast* array = (Z3_ast*) malloc(sizeof(Z3_ast) * Z3_ast_vector_size(g_context, r));
-    for(uint32_t i = 0; i < Z3_ast_vector_size(g_context, r); i++)
-      array[i] = Z3_ast_vector_get(g_context, r, i);
-    Z3_ast query = Z3_mk_and(g_context, Z3_ast_vector_size(g_context, r), array);
-    if(checkConsistencySMT(query, 1) == 0) {
-      printf("Adding infeasible constraints: %s\n", Z3_ast_to_string(g_context, (taken ? constraint : not_constraint)));
+#if DEBUG_CHECK_PI_SOLVER || DEBUG_CHECK_PI_CONCRETE
+  static int check_pi = -1;
+  if (check_pi == -1) {
+
+    char* s = getenv("DEBUG_CHECK_PI");
+    if (s == NULL)
+      check_pi = 0;
+    else if (strcmp(s, "EVAL") == 0)
+      check_pi = 1;
+    else if (strcmp(s, "SMT") == 0)
+      check_pi = 2;
+    else
       abort();
+  }
+#endif
+
+#if DEBUG_CHECK_PI_CONCRETE
+  if (check_pi == 1) {
+    Z3_ast_vector r = Z3_solver_get_assertions(g_context, g_solver);
+    Z3_ast_vector_inc_ref(g_context, r);
+    if (Z3_ast_vector_size(g_context, r) > 0) {
+      printf("CHECKING PI EVAL\n");
+      Z3_ast* array = (Z3_ast*) malloc(sizeof(Z3_ast) * Z3_ast_vector_size(g_context, r));
+      for(uint32_t i = 0; i < Z3_ast_vector_size(g_context, r); i++) {
+        array[i] = Z3_ast_vector_get(g_context, r, i);
+        // printf("EXPR: %s\n", Z3_ast_to_string(g_context, array[i]));
+      }
+      Z3_ast query = Z3_mk_and(g_context, Z3_ast_vector_size(g_context, r), array);
+      Z3_inc_ref(g_context, query);
+      if(checkConsistencySMT(query, 1) == 0) {
+        printf("Adding infeasible constraints: %s\n", Z3_ast_to_string(g_context, (taken ? constraint : not_constraint)));
+        if (debug_abort) abort();
+        printf("CHECKING PI EVAL: KO\n");
+      } else {
+        printf("CHECKING PI EVAL: OK\n");
+      }
+      Z3_dec_ref(g_context, query);
+      free(array);
+    }
+    Z3_ast_vector_dec_ref(g_context, r);
+  }
+#endif
+
+#if DEBUG_CHECK_PI_SOLVER
+  if (check_pi == 2) {
+    printf("CHECKING PI SMT\n");
+    Z3_lbool feasible = Z3_solver_check(g_context, g_solver);
+    if (feasible == Z3_L_FALSE) {
+      printf("Adding infeasible constraints: %s\n", Z3_ast_to_string(g_context, (taken ? constraint : not_constraint)));
+      if (debug_abort) abort();
+      printf("CHECKING PI SMT: KO\n");
     } else {
-      // printf("\nPI OK\n\n");
+      printf("CHECKING PI SMT: OK\n");
     }
   }
-  Z3_ast_vector_dec_ref(g_context, r);
 #endif
 }
 
@@ -695,12 +787,32 @@ size_t _sym_bits_helper(SymExpr expr) {
   return result;
 }
 
-/* No call-stack tracing */
-void _sym_notify_call(uintptr_t) {}
-void _sym_notify_ret(uintptr_t) {}
-#if DEBUG_CONSISTENCY_CHECK
 static uint64_t last_bb = 0;
+static int count = 0;
+
+/* No call-stack tracing */
+void _sym_notify_call(uintptr_t id) {
+#if 0
+  if (count > 1550)
+    printf("CALL BB %lx ADDR: %x\n", id, *((char*)0x7fffffffdcb0));
+#endif
+  (void) id;
+}
+void _sym_notify_ret(uintptr_t id) {
+#if 0
+  if (count > 1550)
+    printf("RET BB %lx ADDR: %x\n", id, *((char*)0x7fffffffdcb0));
+#endif
+  (void) id;
+}
+#if DEBUG_CONSISTENCY_CHECK
 void _sym_notify_basic_block(uintptr_t id) {
+#if 0
+  printf("COUNT: %d\n", count);
+  if (++count > 1550)
+    printf("BB %lx ADDR: %x\n", id, *((char*)0x7fffffffdcb0));
+#endif
+  (void) count;
   last_bb = id;
 }
 #else
@@ -770,10 +882,9 @@ void symcc_set_test_case_handler(TestCaseHandler) {
 }
 
 #if DEBUG_CONSISTENCY_CHECK
+uint64_t concreteEvaluate(Z3_ast e) {
 
-int checkConsistencySMT(Z3_ast e, uint64_t expected_value) {
-
-  static Z3_model m = NULL;
+  Z3_model m = cached_model;
   if (m == NULL) {
     Z3_set_ast_print_mode(g_context, Z3_PRINT_LOW_LEVEL);
     std::vector<uint8_t> values = inputs_;
@@ -809,71 +920,73 @@ int checkConsistencySMT(Z3_ast e, uint64_t expected_value) {
   if (!successfulEval) abort();
 
   if (Z3_get_ast_kind(g_context, solution) == Z3_NUMERAL_AST) {
-    Z3_bool successGet =
-          Z3_get_numeral_uint64(g_context, solution, (uint64_t*)&value);
-    assert(successGet);
-    if (value != expected_value) {
-      Z3_set_ast_print_mode(g_context, Z3_PRINT_LOW_LEVEL);
-      printf("[%d] %s\n", successGet, Z3_ast_to_string(g_context, e));
-      printf("FAILURE: %lx vs expected=%lx\n", value, expected_value);
-    } else {
-      printf("SUCCESS: %lx vs expected=%lx\n", value, expected_value);
-    }
-    return value == expected_value;
+    Z3_get_numeral_uint64(g_context, solution, (uint64_t*)&value);
+    return value;
   } else {
-
     Z3_lbool res = Z3_get_bool_value(g_context, solution);
-    if (res == Z3_L_TRUE) {
-      value = 1;
-      if (value != expected_value) {
-        Z3_set_ast_print_mode(g_context, Z3_PRINT_LOW_LEVEL);
-        printf("%s\n", Z3_ast_to_string(g_context, e));
-        printf("BOOL FAILURE: %lx vs expected=%lx\n", value, expected_value);
-      }
-      return value == expected_value;
-    } else if (res == Z3_L_FALSE) {
-      value = 0;
-      if (value != expected_value) {
-        Z3_set_ast_print_mode(g_context, Z3_PRINT_LOW_LEVEL);
-        printf("%s\n", Z3_ast_to_string(g_context, e));
-        printf("BOOL FAILURE: %lx vs expected=%lx\n", value, expected_value);
-      }
-      return value == expected_value;
-    } else {
-      printf("KIND: %x\n", Z3_get_ast_kind(g_context, solution));
-      Z3_set_ast_print_mode(g_context, Z3_PRINT_LOW_LEVEL);
-      printf("EXPR: %s\n", Z3_ast_to_string(g_context, e));
-      assert(0 && "Cannot evaluate");
-      abort();
-    }
+    if (res == Z3_L_TRUE) return 1;
+    else if (res == Z3_L_FALSE) return 0;
+    else abort();
   }
 }
 
+int checkConsistencySMT(Z3_ast e, uint64_t expected_value) {
+  uint64_t value = concreteEvaluate(e);
+  int check = value == expected_value;
+  if (check == 0)
+    printf("CHECK: %lx vs expected=%lx\n", value, expected_value);
+  return check;
+}
+
 int checkConsistency(Z3_ast e, uint64_t expected_value) {
-  return checkConsistencySMT(e, expected_value);
+  int check = checkConsistencySMT(e, expected_value);
+  printf("CHECK_EXPR: %s\n", check ? "SUCCESS" : "FAILURE");
+  return check;
 }
 
 void _sym_check_consistency(SymExpr expr, uint64_t expected_value, uint64_t) {
   if (expr == NULL) return;
-  int res = checkConsistency(expr, expected_value);
+
+  if (debug_abort == -1) {
+    if (getenv("DEBUG_ABORT_ON_INCONSISTENCY")) 
+      debug_abort = 1;
+    else
+      debug_abort = 0;
+  }
+
+  static int check_expr_consistency = -1;
+  if (check_expr_consistency == -1) {
+    if (getenv("DEBUG_EXPR_CONSISTENCY"))
+      check_expr_consistency = 1;
+    else
+      check_expr_consistency = 0;
+  }
+
+  int res = check_expr_consistency ? checkConsistency(expr, expected_value) : 1;
   if (res == 0) {
+    printf("EXPR: %s\n", Z3_ast_to_string(g_context, expr));
     printf("CONSISTENCY CHECK FAILED AT %lx\n", last_bb);
-    abort();
+    if (debug_abort) abort();
   }
 
 #if DEBUG_FUZZ_EXPRS
 
-  int fuzz_expr = -1;
-  uint64_t fuzz_count = 0;
-  uint64_t fuzz_value = 0;
+  static int fuzz_expr = -1;
+  static uint64_t fuzz_count = 0;
+  static uint64_t fuzz_value = 0;
   if (fuzz_expr == -1) {
 
-    if (getenv("DEBUG_FUZZ_EXPR"))
-      fuzz_expr = 1;
-    else
+    char* s = getenv("DEBUG_FUZZ_EXPR");
+    if (s == NULL)
       fuzz_expr = 0;
+    else if (strcmp(s, "DUMP") == 0)
+      fuzz_expr = 1;
+    else if (strcmp(s, "CHECK") == 0)
+      fuzz_expr = 2;
+    else
+      abort();
 
-    if (fuzz_expr) {
+    if (fuzz_expr == 2) {
       if (getenv("DEBUG_FUZZ_EXPR_COUNT"))
         fuzz_count = atoi(getenv("DEBUG_FUZZ_EXPR_COUNT"));
       else
@@ -887,60 +1000,121 @@ void _sym_check_consistency(SymExpr expr, uint64_t expected_value, uint64_t) {
   }
 
   fuzz_check_count += 1;
-  if (fuzz_expr) {
+  if (fuzz_expr == 2) {
     if (fuzz_count == fuzz_check_count) {
       if (fuzz_value == expected_value) {
         printf("Expression has expected value!\n");
         exit(0);
       } else {
         printf("Expression has wrong value [%lx vs expected=%lx]\n", expected_value, fuzz_value);
-        exit(66);
+        if (debug_abort) abort();
+        else exit(0);
       }
     } else if (fuzz_count < fuzz_check_count) {
       printf("Expression check has been bypassed [count is larger]\n");
-      exit(66);
+      if (debug_abort) abort();
+      else exit(0);
     }
-    return;
   }
 
-  Z3_solver_push(g_context, g_solver);
-  Z3_sort sort = Z3_get_sort(g_context, expr);
-  Z3_ast not_e;
-  uint64_t current_value = expected_value;
-  for (int i = 0; i < DEBUG_FUZZ_EXPRS_N; i++) {
-    bool is_bool = false;
-    if (Z3_get_sort_kind(g_context, sort) == Z3_BOOL_SORT) {
-      not_e = Z3_mk_not(g_context, expr);
-      is_bool = true;
-    } else
-      not_e = _sym_build_not_equal(expr, _sym_build_integer(current_value, _sym_bits_helper(expr)));
-    Z3_solver_assert(g_context, g_solver, not_e);
-    Z3_lbool feasible = Z3_solver_check(g_context, g_solver);
-    if (feasible == Z3_L_TRUE) {
-      Z3_model model = Z3_solver_get_model(g_context, g_solver);
-      Z3_model_inc_ref(g_context, model);
-      std::vector<uint8_t> values = getConcreteValues(model);
-      Z3_ast solution = nullptr;
-      Z3_model_eval(g_context, model, expr, Z3_TRUE, &solution);
-      uint64_t value = 0;
-      if (is_bool) {
-        Z3_lbool res = Z3_get_bool_value(g_context, solution);
-        if (res == Z3_L_TRUE)
-          value = 1;
-        else if (res == Z3_L_FALSE)
-          value = 0;
-        else
-          abort();
+  if (fuzz_expr == 1) {
+
+    Z3_solver_push(g_context, g_solver);
+    Z3_sort sort = Z3_get_sort(g_context, expr);
+    Z3_ast not_e;
+    uint64_t current_value = expected_value;
+    for (int i = 0; i < DEBUG_FUZZ_EXPRS_N; i++) {
+      bool is_bool = false;
+      if (Z3_get_sort_kind(g_context, sort) == Z3_BOOL_SORT) {
+        not_e = current_value == 1 ? Z3_mk_not(g_context, expr) : expr;
+        is_bool = true;
       } else
-        Z3_get_numeral_uint64(g_context, solution, &value);
-      assert(current_value != value);
-      current_value = value;
-      saveDebugInput(values, value, i);
-      Z3_model_dec_ref(g_context, model);
-    } 
-    if (is_bool) break;
+        not_e = _sym_build_not_equal(expr, _sym_build_integer(current_value, _sym_bits_helper(expr)));
+      Z3_solver_assert(g_context, g_solver, not_e);
+      Z3_lbool feasible = Z3_solver_check(g_context, g_solver);
+      if (feasible == Z3_L_TRUE) {
+        Z3_model model = Z3_solver_get_model(g_context, g_solver);
+        Z3_model_inc_ref(g_context, model);
+        std::vector<uint8_t> values = getConcreteValues(model);
+        Z3_ast solution = nullptr;
+        Z3_model_eval(g_context, model, expr, Z3_TRUE, &solution);
+        uint64_t value = 0;
+        if (is_bool) {
+          Z3_lbool res = Z3_get_bool_value(g_context, solution);
+          if (res == Z3_L_TRUE)
+            value = 1;
+          else if (res == Z3_L_FALSE)
+            value = 0;
+          else
+            abort();
+        } else
+          Z3_get_numeral_uint64(g_context, solution, &value);
+        assert(current_value != value);
+        current_value = value;
+        saveDebugInput(values, value, i);
+        Z3_model_dec_ref(g_context, model);
+      } else break;
+      if (is_bool) break;
+    }
+    Z3_solver_pop(g_context, g_solver, 1);
   }
-  Z3_solver_pop(g_context, g_solver, 1);
 #endif
+}
+#endif
+
+#if DEBUG_CHECK_EXPR_OPTS
+void checkConsistencyOpt(SymExpr e0, SymExpr e1) {
+
+  static int check_opt = -1;
+  if (check_opt == -1) {
+
+    char* s = getenv("DEBUG_CHECK_OPT");
+    if (s == NULL)
+      check_opt = 0;
+    else if (strcmp(s, "EVAL") == 0)
+      check_opt = 1;
+    else if (strcmp(s, "SMT") == 0)
+      check_opt = 2;
+    else
+      abort();
+  }
+
+  if (check_opt == 1) {
+    printf("CHECKING OPT EVAL\n");
+    uint64_t v0 = concreteEvaluate(e0);
+    uint64_t v1 = concreteEvaluate(e1);
+    if (v0 != v1) {
+      printf("[EVAL] Invalid expression optimization!\n");
+      printf("E0: %s\n", Z3_ast_to_string(g_context, e0));
+      printf("E1: %s\n", Z3_ast_to_string(g_context, e1)); 
+      if (debug_abort) abort();
+      printf("CHECKING OPT EVAL: KO\n");
+    } else
+      printf("CHECKING OPT EVAL: OK\n");
+  }
+
+  if (check_opt == 2) {
+    printf("CHECKING OPT SMT\n");
+    Z3_solver solver = Z3_mk_solver(g_context);
+    Z3_solver_inc_ref(g_context, solver);
+    SymExpr c0 = Z3_mk_eq(g_context, e0, e1);
+    Z3_inc_ref(g_context, c0);
+    SymExpr c1 = Z3_mk_not(g_context, c0);
+    Z3_inc_ref(g_context, c1);
+    Z3_solver_assert(g_context, solver, c1);
+    Z3_lbool r = Z3_solver_check(g_context, solver);
+    if (r == Z3_L_TRUE) {
+      printf("[SAT] Invalid expression optimization!\n");
+      printf("E0: %s\n", Z3_ast_to_string(g_context, e0));
+      printf("E1: %s\n", Z3_ast_to_string(g_context, e1)); 
+      if (debug_abort) abort();
+      printf("CHECKING OPT SMT: KO\n");
+    } else {
+      printf("CHECKING OPT SMT: OK\n");
+    }
+    Z3_dec_ref(g_context, c0);
+    Z3_dec_ref(g_context, c1);
+    Z3_solver_dec_ref(g_context, solver);
+  }
 }
 #endif

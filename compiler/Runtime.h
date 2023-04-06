@@ -51,8 +51,14 @@ struct Runtime {
   SymFnT buildBoolAnd{};
   SymFnT buildBoolOr{};
   SymFnT buildBoolXor{};
+#if SYMCC_FIX_ISSUE_108
   SymFnT buildBoolToBit{};
+#else
+  SymFnT buildBoolToBits{};
+#endif
+#if SYMCC_FIX_ISSUE_112
   SymFnT buildBitToBool{};
+#endif
   SymFnT pushPathConstraint{};
   SymFnT getParameterExpression{};
   SymFnT setParameterExpression{};
@@ -69,6 +75,10 @@ struct Runtime {
   SymFnT notifyCall{};
   SymFnT notifyRet{};
   SymFnT notifyBasicBlock{};
+
+#if SYMCC_FIX_VARIADIC
+  SymFnT vaListStart{};
+#endif
 
 #if DEBUG_CONSISTENCY_CHECK
   SymFnT checkConsistency{};

@@ -295,6 +295,14 @@ void Symbolizer::handleIntrinsicCall(CallBase &I) {
     registerSymbolicComputation(swapped, &I);
     break;
   }
+#if SYMCC_FIX_VARIADIC
+  case Intrinsic::vastart: {
+    IRBuilder<> IRB(&I);
+    IRB.SetInsertPoint(I.getNextNode());
+    IRB.CreateCall(runtime.vaListStart, I.getOperand(0));
+    break;
+  }
+#endif
   default:
     errs() << "Warning: unhandled LLVM intrinsic " << callee->getName()
            << "; the result will be concretized\n";
@@ -418,7 +426,7 @@ void Symbolizer::visitSelectInst(SelectInst &I) {
     addConsistencyCheck(I.getTrueValue(), getSymbolicExpressionOrNull(I.getTrueValue()), IRB);
     addConsistencyCheck(I.getFalseValue(), getSymbolicExpressionOrNull(I.getFalseValue()), IRB);
 #endif
-
+#if SYMCC_FIX_ISSUE_109
     auto *data = IRB.CreateSelect(
         I.getCondition(), getSymbolicExpressionOrNull(I.getTrueValue()),
         getSymbolicExpressionOrNull(I.getFalseValue()));
@@ -427,6 +435,7 @@ void Symbolizer::visitSelectInst(SelectInst &I) {
 #if DEBUG_CONSISTENCY_CHECK
     IRB.SetInsertPoint(I.getNextNode());
     addConsistencyCheck(&I, data, IRB);
+#endif
 #endif
   }
 }
@@ -534,11 +543,13 @@ void Symbolizer::visitLoadInst(LoadInst &I) {
   if (dataType->isFloatingPointTy()) {
     data = IRB.CreateCall(runtime.buildBitsToFloat,
                           {data, IRB.getInt1(dataType->isDoubleTy())});
+#if SYMCC_FIX_ISSUE_112
   } else if (dataType->isIntegerTy() && dataType->getIntegerBitWidth() == 1) {
     /* convert from byte back to a bool (i1) */
     data = IRB.CreateCall(runtime.buildTrunc,
                           {data, ConstantInt::get(IRB.getInt8Ty(), 1)});
     data = IRB.CreateCall(runtime.buildBitToBool, {data});
+#endif
   }
 
   symbolicExpressions[&I] = data;
@@ -558,12 +569,14 @@ void Symbolizer::visitStoreInst(StoreInst &I) {
   auto *dataType = I.getValueOperand()->getType();
   if (dataType->isFloatingPointTy()) {
     data = IRB.CreateCall(runtime.buildFloatToBits, data);
+#if SYMCC_FIX_ISSUE_112
   } else if (dataType->isIntegerTy() && dataType->getIntegerBitWidth() == 1) {
     /* convert from i1 (bool) to a byte */
     data = IRB.CreateCall(runtime.buildBoolToBit, {data});
     data = IRB.CreateCall(
         runtime.buildZExt,
         {data, ConstantInt::get(IRB.getInt8Ty(), 7 /* 1 byte */)});
+#endif
   }
 
   IRB.CreateCall(
@@ -698,7 +711,7 @@ void Symbolizer::visitBitCastInst(BitCastInst &I) {
 
 void Symbolizer::visitTruncInst(TruncInst &I) {
   IRBuilder<> IRB(&I);
-
+#if SYMCC_FIX_ISSUE_112
   if (getSymbolicExpression(I.getOperand(0)) == nullptr)
     return;
 
@@ -717,6 +730,13 @@ void Symbolizer::visitTruncInst(TruncInst &I) {
   }
 
   registerSymbolicComputation(symbolicComputation, &I);
+#else
+  auto trunc = buildRuntimeCall(
+      IRB, runtime.buildTrunc,
+      {{I.getOperand(0), true},
+       {IRB.getInt8(I.getDestTy()->getIntegerBitWidth()), false}});
+  registerSymbolicComputation(trunc, &I);
+#endif
 }
 
 void Symbolizer::visitIntToPtrInst(IntToPtrInst &I) {
@@ -795,7 +815,7 @@ void Symbolizer::visitCastInst(CastInst &I) {
   }
 
   IRBuilder<> IRB(&I);
-
+#if SYMCC_FIX_ISSUE_108
   SymFnT target;
 
   switch (I.getOpcode()) {
@@ -808,12 +828,13 @@ void Symbolizer::visitCastInst(CastInst &I) {
   default:
     llvm_unreachable("Unknown cast opcode");
   }
-
+#endif
   // LLVM bitcode represents Boolean values as i1. In Z3, those are a not a
   // bit-vector sort, so trying to cast one into a bit vector of any length
   // raises an error. The run-time library provides a dedicated conversion
   // function for this case.
   if (I.getSrcTy()->getIntegerBitWidth() == 1) {
+#if SYMCC_FIX_ISSUE_108
 
     SymbolicComputation symbolicComputation;
     symbolicComputation.merge(forceBuildRuntimeCall(IRB, runtime.buildBoolToBit,
@@ -824,8 +845,27 @@ void Symbolizer::visitCastInst(CastInst &I) {
          {IRB.getInt8(I.getDestTy()->getIntegerBitWidth() - 1), false}}));
 
     registerSymbolicComputation(symbolicComputation, &I);
-
   } else {
+#else
+    auto boolToBitConversion = buildRuntimeCall(
+        IRB, runtime.buildBoolToBits,
+        {{I.getOperand(0), true},
+         {IRB.getInt8(I.getDestTy()->getIntegerBitWidth()), false}});
+    registerSymbolicComputation(boolToBitConversion, &I);
+  } else {
+    SymFnT target;
+
+    switch (I.getOpcode()) {
+    case Instruction::SExt:
+      target = runtime.buildSExt;
+      break;
+    case Instruction::ZExt:
+      target = runtime.buildZExt;
+      break;
+    default:
+      llvm_unreachable("Unknown cast opcode");
+    }
+#endif
     auto symbolicCast =
         buildRuntimeCall(IRB, target,
                          {{I.getOperand(0), true},

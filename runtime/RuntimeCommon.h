@@ -124,9 +124,14 @@ SymExpr _sym_build_bits_to_float(SymExpr expr, int to_double);
 SymExpr _sym_build_float_to_bits(SymExpr expr);
 SymExpr _sym_build_float_to_signed_integer(SymExpr expr, uint8_t bits);
 SymExpr _sym_build_float_to_unsigned_integer(SymExpr expr, uint8_t bits);
+#if SYMCC_FIX_ISSUE_108
 SymExpr _sym_build_bool_to_bit(SymExpr expr);
+#else
+SymExpr _sym_build_bool_to_bits(SymExpr expr, uint8_t bits);
+#endif
+#if SYMCC_FIX_ISSUE_112
 SymExpr _sym_build_bit_to_bool(SymExpr expr);
-
+#endif
 /*
  * Bit-array helpers
  */
@@ -177,6 +182,10 @@ void _sym_notify_basic_block(uintptr_t site_id);
  */
 const char *_sym_expr_to_string(SymExpr expr); // statically allocated
 bool _sym_feasible(SymExpr expr);
+
+#if SYMCC_FIX_VARIADIC
+void _sym_va_list_start(uint64_t *ap);
+#endif
 
 #if DEBUG_CONSISTENCY_CHECK
 void _sym_check_consistency(SymExpr expr, uint64_t expected_value, uint64_t addr);

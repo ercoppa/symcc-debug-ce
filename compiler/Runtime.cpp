@@ -69,8 +69,14 @@ Runtime::Runtime(Module &M) {
   buildBoolAnd = import(M, "_sym_build_bool_and", ptrT, ptrT, ptrT);
   buildBoolOr = import(M, "_sym_build_bool_or", ptrT, ptrT, ptrT);
   buildBoolXor = import(M, "_sym_build_bool_xor", ptrT, ptrT, ptrT);
+#if SYMCC_FIX_ISSUE_108
   buildBoolToBit = import(M, "_sym_build_bool_to_bit", ptrT, ptrT);
+#else
+  buildBoolToBits = import(M, "_sym_build_bool_to_bits", ptrT, ptrT, int8T);
+#endif
+#if SYMCC_FIX_ISSUE_112
   buildBitToBool = import(M, "_sym_build_bit_to_bool", ptrT, ptrT);
+#endif
   pushPathConstraint = import(M, "_sym_push_path_constraint", voidT, ptrT,
                               IRB.getInt1Ty(), intPtrType);
 
@@ -158,6 +164,10 @@ Runtime::Runtime(Module &M) {
   notifyRet = import(M, "_sym_notify_ret", voidT, intPtrType);
   notifyBasicBlock = import(M, "_sym_notify_basic_block", voidT, intPtrType);
 
+#if SYMCC_FIX_VARIADIC
+  vaListStart = import(M, "_sym_va_list_start", voidT, ptrT);
+#endif
+
 #if DEBUG_CONSISTENCY_CHECK
   checkConsistency = import(M, "_sym_check_consistency", voidT, ptrT, IRB.getInt64Ty(), IRB.getInt64Ty());
 #endif
@@ -169,7 +179,11 @@ bool isInterceptedFunction(const Function &f) {
       "malloc",   "calloc",  "mmap",    "mmap64", "open",   "read",    "lseek",
       "lseek64",  "fopen",   "fopen64", "fread",  "fseek",  "fseeko",  "rewind",
       "fseeko64", "getc",    "ungetc",  "memcpy", "memset", "strncpy", "strchr",
-      "memcmp",   "memmove", "ntohl",   "fgets",  "fgetc",  "getchar"};
+      "memcmp",   "memmove", "ntohl",   "fgets",  "fgetc",  "getchar", "openat",
+#if SYMCC_FIX_ISSUE_SPRINTF
+      "sprintf"
+#endif
+  };
 
   return (kInterceptedFunctions.count(f.getName()) > 0);
 }

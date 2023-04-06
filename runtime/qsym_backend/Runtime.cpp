@@ -66,6 +66,10 @@
 #include <LibcWrappers.h>
 #include <Shadow.h>
 
+#if DEBUG_CONSISTENCY_CHECK
+int debug_abort = -1;
+#endif
+
 namespace qsym {
 
 ExprBuilder *g_expr_builder;
@@ -184,6 +188,14 @@ void _sym_initialize(void) {
   g_solver = g_enhanced_solver; // for QSYM-internal use
   g_expr_builder = g_config.pruning ? PruneExprBuilder::create()
                                     : SymbolicExprBuilder::create();
+#if DEBUG_CONSISTENCY_CHECK
+  if (debug_abort == -1) {
+    if (getenv("DEBUG_ABORT_ON_INCONSISTENCY")) 
+      debug_abort = 1;
+    else
+      debug_abort = 0;
+  }
+#endif
 }
 
 SymExpr _sym_build_integer(uint64_t value, uint8_t bits) {
@@ -320,6 +332,7 @@ SymExpr _sym_extract_helper(SymExpr expr, size_t first_bit, size_t last_bit) {
 
 size_t _sym_bits_helper(SymExpr expr) { return expr->bits(); }
 
+#if SYMCC_FIX_ISSUE_108
 SymExpr _sym_build_bool_to_bit(SymExpr expr) {
   if (expr == nullptr)
     return nullptr;
@@ -327,6 +340,12 @@ SymExpr _sym_build_bool_to_bit(SymExpr expr) {
   return registerExpression(
       g_expr_builder->boolToBit(allocatedExpressions.at(expr), 1));
 }
+#else
+SymExpr _sym_build_bool_to_bits(SymExpr expr, uint8_t bits) {
+  return registerExpression(
+      g_expr_builder->boolToBit(allocatedExpressions.at(expr), bits));
+}
+#endif
 
 //
 // Floating-point operations (unsupported in QSYM)
@@ -379,6 +398,7 @@ void _sym_notify_ret(uintptr_t site_id) {
 }
 
 void _sym_notify_basic_block(uintptr_t site_id) {
+  // fprintf(stderr, "BB %lx\n", site_id);
   g_call_stack_manager.visitBasicBlock(site_id);
 }
 
@@ -452,12 +472,14 @@ void symcc_set_test_case_handler(TestCaseHandler handler) {
 }
 
 #if DEBUG_CONSISTENCY_CHECK
-void _sym_check_consistency(SymExpr expr, uint64_t expected_value, uint64_t addr) {
+void _sym_check_consistency(SymExpr expr, uint64_t expected_value, uint64_t) {
   if (expr == NULL) return;
+
   int res = g_solver->checkConsistency(allocatedExpressions.at(expr), expected_value);
   if (res == 0) {
-    printf("CONSISTENCY CHECK FAILED AT %lx\n", g_call_stack_manager.currentBasicBlock());
-    abort();
+    fprintf(stderr, "CONSISTENCY CHECK FAILED AT %lx\n", g_call_stack_manager.currentBasicBlock());
+    fprintf(stderr, "\n\n\n\n");
+    if (debug_abort) abort();
   }
 }
 #endif

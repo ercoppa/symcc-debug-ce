@@ -60,6 +60,8 @@ void tryAlternative(E *value, SymExpr valueExpr, F caller) {
 }
 
 void maybeSetInputFile(const char *path, int fd) {
+
+  // printf("OPEN: %s\n", path);
   auto *fileInput = std::get_if<FileInput>(&g_config.input);
   if (fileInput == nullptr)
     return;
@@ -134,6 +136,16 @@ int SYM(open)(const char *path, int oflag, mode_t mode) {
   return result;
 }
 
+int SYM(openat)(int dirfd, const char *path, int oflag, mode_t mode) {
+  auto result = openat(dirfd, path, oflag, mode);
+  _sym_set_return_expression(nullptr);
+
+  if (result >= 0)
+    maybeSetInputFile(path, result);
+
+  return result;
+}
+
 ssize_t SYM(read)(int fildes, void *buf, size_t nbyte) {
   tryAlternative(buf, _sym_get_parameter_expression(1), SYM(read));
   tryAlternative(nbyte, _sym_get_parameter_expression(2), SYM(read));
@@ -199,6 +211,7 @@ uint32_t SYM(lseek)(int fd, uint32_t offset, int whence) {
 }
 
 FILE *SYM(fopen)(const char *pathname, const char *mode) {
+  // printf("OPEN: %s\n", pathname);
   auto *result = fopen(pathname, mode);
   _sym_set_return_expression(nullptr);
 
@@ -225,6 +238,8 @@ size_t SYM(fread)(void *ptr, size_t size, size_t nmemb, FILE *stream) {
 
   auto result = fread(ptr, size, nmemb, stream);
   _sym_set_return_expression(nullptr);
+
+  // printf("FREAD: %p size=%ld res=%ld sym=%d\n", ptr, size*nmemb, result, fileno(stream) == inputFileDescriptor);
 
   if (fileno(stream) == inputFileDescriptor) {
     // Reading symbolic input.
@@ -504,4 +519,22 @@ uint32_t SYM(ntohl)(uint32_t netlong) {
 
   return result;
 }
+
+#if SYMCC_FIX_ISSUE_SPRINTF
+#include <stdarg.h>
+
+int SYM(sprintf)(char *str, const char *format, ...) __attribute__ ((format (printf, 2, 3)));
+int SYM(sprintf)(char *str, const char *format, ...) {
+  va_list args;
+  va_start(args, format);
+  auto res = vsprintf(str, format, args);
+  if (res > 0) {
+    ReadWriteShadow destRestShadow(str, res + 1);
+    std::fill(destRestShadow.begin(), destRestShadow.end(), nullptr);
+  }
+  _sym_set_return_expression(nullptr);
+  return res;
+}
+#endif
+
 }

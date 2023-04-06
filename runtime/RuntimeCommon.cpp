@@ -141,8 +141,10 @@ SymExpr _sym_read_memory(uint8_t *addr, size_t length, bool little_endian) {
               printf("READ SIZE: %ld\n", length);
               assert(0 && "Unexpected read size");
       }
-      if (length <= 8)
+      if (length <= 8) {
+        // printf("CHECK WHEN READING AT %p\n", addr);
         _sym_check_consistency(res, expected_value, (uint64_t)addr);
+      }
   }
 #endif
   return res;
@@ -268,6 +270,7 @@ void symcc_make_symbolic(void *start, size_t byte_length) {
   inputOffset += byte_length;
 }
 
+#if SYMCC_FIX_ISSUE_112
 SymExpr _sym_build_bit_to_bool(SymExpr expr) {
   if (expr == nullptr)
     return nullptr;
@@ -275,3 +278,15 @@ SymExpr _sym_build_bit_to_bool(SymExpr expr) {
   return _sym_build_not_equal(expr,
                               _sym_build_integer(0, _sym_bits_helper(expr)));
 }
+#endif
+
+#if SYMCC_FIX_VARIADIC
+void _sym_va_list_start(uint64_t *ap) {
+  uint64_t *args = (uint64_t *)ap[2];
+  for (int i = 0; i < 6; i++)
+    _sym_write_memory((uint8_t *)&args[i], 8, NULL, false);
+
+  for (unsigned int i = 0; i < sizeof(va_list) / 8; i++)
+    _sym_write_memory((uint8_t *)&ap[i], 8, NULL, false);
+}
+#endif
